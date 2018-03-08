@@ -1,11 +1,19 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"os"
+	"strconv"
+	"time"
 
+	"github.com/coreos/etcd/etcdserver/stats"
 	"github.com/coreos/etcd/pkg/fileutil"
+	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/coreos/etcd/rafthttp"
@@ -23,8 +31,8 @@ type raftNode struct {
 	commitC     chan<- *string           // entries committed to log (k,v)
 	errorC      chan<- error             // errors from raft session
 
-	id          int      // client ID for raft session
-	peers       []string // raft peer URLs
+	id          uint64   // client ID for raft session
+	peers       []string // raft peers
 	join        bool     // node is joining an existing cluster
 	waldir      string   // path to WAL directory
 	snapdir     string   // path to snapshot directory
@@ -50,41 +58,7 @@ type raftNode struct {
 	httpdonec chan struct{} // signals http server shutdown complete
 }
 
-// newRaftNode initiates a raft instance and returns a committed log entry
-// channel and error channel. Proposals for log updates are sent over the
-// provided the proposal channel. All log entries are replayed over the
-// commit channel, followed by a nil message (to indicate the channel is
-// current), then new log entries. To shutdown, close proposeC and read errorC.
-func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, error), proposeC <-chan string,
-	confChangeC <-chan raftpb.ConfChange) (<-chan *string, <-chan error, <-chan *raftsnap.Snapshotter) {
-
-	commitC := make(chan *string)
-	errorC := make(chan error)
-
-	rc := &raftNode{
-		proposeC:    proposeC,
-		confChangeC: confChangeC,
-		commitC:     commitC,
-		errorC:      errorC,
-		id:          id,
-		peers:       peers,
-		join:        join,
-		waldir:      fmt.Sprintf("raftexample-%d", id),
-		snapdir:     fmt.Sprintf("raftexample-%d-snap", id),
-		getSnapshot: getSnapshot,
-		snapCount:   defaultSnapCount,
-		stopc:       make(chan struct{}),
-		httpstopc:   make(chan struct{}),
-		httpdonec:   make(chan struct{}),
-
-		snapshotterReady: make(chan *raftsnap.Snapshotter, 1),
-		// rest of structure populated after WAL replay
-	}
-	go rc.startRaft()
-	return commitC, errorC, rc.snapshotterReady
-}
-
-func (rc *raftNode) startRaft() {
+func (rc *raftNode) openSnapshot() *raftpb.Snapshot {
 	if !fileutil.Exist(rc.snapdir) {
 		if err := os.Mkdir(rc.snapdir, 0750); err != nil {
 			log.Fatalf("raftexample: cannot create dir for snapshot (%v)", err)
@@ -92,41 +66,6 @@ func (rc *raftNode) startRaft() {
 	}
 	rc.snapshotter = raftsnap.New(rc.snapdir)
 	rc.snapshotterReady <- rc.snapshotter
-
-	rc.wal = rc.replayWAL()
-}
-
-// replayWAL replays WAL entries into the raft instance.
-func (rc *raftNode) replayWAL() *wal.WAL {
-	log.Printf("replaying WAL of member %d", rc.id)
-	snapshot := rc.loadSnapshot()
-	w := rc.openWAL(snapshot)
-	_, st, ents, err := w.ReadAll()
-	if err != nil {
-		log.Fatalf("raftexample: failed to read WAL (%v)", err)
-	}
-	rc.raftStorage = raft.NewMemoryStorage()
-	if snapshot != nil {
-		if err := rc.raftStorage.ApplySnapshot(*snapshot); err != nil {
-			log.Fatalf("raftexample: failed to apply snapshot (%v)", err)
-		}
-	}
-	if err := rc.raftStorage.SetHardState(st); err != nil {
-		log.Fatalf("raftexample: failed to set hardstate (%v)", err)
-	}
-
-	if err := rc.raftStorage.Append(ents); err != nil {
-		log.Fatalf("raftexample: failed to append entries (%v)", err)
-	}
-
-	if len(ents) > 0 {
-		rc.lastIndex = ents[len(ents)-1].Index
-	}
-
-	return w
-}
-
-func (rc *raftNode) loadSnapshot() *raftpb.Snapshot {
 	snapshot, err := rc.snapshotter.Load()
 	if err != nil && err != raftsnap.ErrEmptySnapshot {
 		log.Fatalf("raftexample: error loading snapshot (%v)", err)
@@ -136,7 +75,7 @@ func (rc *raftNode) loadSnapshot() *raftpb.Snapshot {
 }
 
 func (rc *raftNode) openWAL(snapshot *raftpb.Snapshot) *wal.WAL {
-	if !wal.Exist(rc.waldir) {
+	if !fileutil.Exist(rc.waldir) {
 		if err := os.Mkdir(rc.waldir, 0750); err != nil {
 			log.Fatalf("raftexample: cannot create dir for wal (%v)", err)
 		}
@@ -159,3 +98,170 @@ func (rc *raftNode) openWAL(snapshot *raftpb.Snapshot) *wal.WAL {
 	}
 	return w
 }
+
+// replayWAL replays WAL entries into the raft instance.
+func (rc *raftNode) replayWAL() *wal.WAL {
+	log.Printf("replaying WAL of member %d", rc.id)
+	snapshot := rc.openSnapshot()
+	w := rc.openWAL(snapshot)
+	_, st, ents, err := w.ReadAll()
+	if err != nil {
+		log.Fatalf("raftexample: failed to read WAL (%v)", err)
+	}
+	rc.raftStorage = raft.NewMemoryStorage()
+	if snapshot != nil {
+		if err := rc.raftStorage.ApplySnapshot(*snapshot); err != nil {
+			log.Fatalf("raftexample: failed to apply snapshot (%v)", err)
+		}
+	}
+	if err := rc.raftStorage.SetHardState(st); err != nil {
+		log.Fatalf("raftexample: failed to set hardstate (%v)", err)
+	}
+
+	if err := rc.raftStorage.Append(ents); err != nil {
+		log.Fatalf("raftexample: failed to append entries (%v)", err)
+	}
+
+	return w
+}
+
+func (rc *raftNode) startRaft() {
+	// replays WAL entries into the raft instance.
+	rc.wal = rc.replayWAL()
+
+	c := &raft.Config{
+		ID:              rc.id,
+		ElectionTick:    200,
+		HeartbeatTick:   20,
+		Storage:         rc.raftStorage,
+		MaxSizePerMsg:   1024 * 1024,
+		MaxInflightMsgs: 256,
+	}
+
+	rpeers := make([]raft.Peer, len(rc.peers))
+	for i := range rpeers {
+		rpeers[i] = raft.Peer{ID: uint64(i + 1)}
+	}
+
+	// waldir store all the entry, so only determine waldir
+	if fileutil.Exist(rc.waldir) {
+		rc.node = raft.RestartNode(c)
+	} else {
+		rc.node = raft.StartNode(c, rpeers)
+	}
+
+	rc.transport = &rafthttp.Transport{
+		ID:          types.ID(rc.id),
+		Raft:        rc,
+		ClusterID:   0x1000,
+		ServerStats: stats.NewServerStats("", ""),
+		LeaderStats: stats.NewLeaderStats(strconv.Itoa(int(rc.id))),
+		ErrorC:      make(chan error),
+	}
+
+	rc.transport.Start()
+	for i := range rc.peers {
+		if i+1 != int(rc.id) {
+			rc.transport.AddPeer(types.ID(i+1), []string{rc.peers[i]})
+		}
+	}
+
+	go rc.serveRaft()
+}
+
+func (rc *raftNode) serveRaft() {
+	url, err := url.Parse(rc.peers[rc.id-1])
+	if err != nil {
+		log.Fatalf("raftexample: Failed parsing URL (%v)", err)
+	}
+
+	ln, err := newStoppableListener(host, rc.httpstopc)
+	if err != nil {
+		log.Fatalf("raftexample: Failed start raft httpserver: (%v)", err)
+	}
+}
+
+// stoppableListener sets TCP keep-alive timeouts on accepted
+// connections and waits on stopc message
+type stoppableListener struct {
+	*net.TCPListener
+	stopc <-chan struct{}
+}
+
+func newStoppableListener(host string, stopc <-chan struct{}) (*stoppableListener, error) {
+	ln, err := net.Listen("tcp", host)
+	if err != nil {
+		return nil, err
+	}
+
+	return &stoppableListener{
+		TCPListener: ln.(*net.TCPListener),
+		stopc:       stopc,
+	}, nil
+}
+
+func (ln *stoppableListener) Accept() (net.Conn, error) {
+	errc := make(chan error, 1)
+	connc := make(chan *net.TCPConn, 1)
+	go func() {
+		c, err := ln.AcceptTCP()
+		if err != nil {
+			errc <- err
+			return
+		}
+		connc <- c
+	}()
+
+	select {
+	case <-ln.stopc:
+		return nil, errors.New("server stopped")
+	case err := <-errc:
+		return nil, err
+	case c := <-connc:
+		c.SetKeepAlive(true)
+		c.SetKeepAlivePeriod(3 * time.Minute)
+		return c, nil
+	}
+}
+
+// newRaftNode initiates a raft instance and returns a committed log entry
+// channel and error channel. Proposals for log updates are sent over the
+// provided the proposal channel. All log entries are replayed over the
+// commit channel, followed by a nil message (to indicate the channel is
+// current), then new log entries. To shutdown, close proposeC and read errorC.
+func newRaftNode(cfg *config, getSnapshot func() ([]byte, error), proposeC <-chan string,
+	confChangeC <-chan raftpb.ConfChange) (<-chan *string, <-chan error, <-chan *raftsnap.Snapshotter) {
+
+	commitC := make(chan *string)
+	errorC := make(chan error)
+
+	rc := &raftNode{
+		proposeC:    proposeC,
+		confChangeC: confChangeC,
+		commitC:     commitC,
+		errorC:      errorC,
+		stopc:       make(chan struct{}),
+		httpstopc:   make(chan struct{}),
+		httpdonec:   make(chan struct{}),
+		id:          cfg.id,
+		peers:       cfg.peers,
+		join:        cfg.join,
+		waldir:      fmt.Sprintf("raftexample-%d", cfg.id),
+		snapdir:     fmt.Sprintf("raftexample-%d-snap", cfg.id),
+		getSnapshot: getSnapshot,
+		snapCount:   defaultSnapCount,
+
+		snapshotterReady: make(chan *raftsnap.Snapshotter, 1),
+		// rest of structure populated after WAL replay
+	}
+	go rc.startRaft()
+	return commitC, errorC, rc.snapshotterReady
+}
+
+// implementation rafthttp.Raft interface
+func (rc *raftNode) Process(ctx context.Context, m raftpb.Message) error {
+	return rc.node.Step(ctx, m)
+}
+func (rc *raftNode) IsIDRemoved(id uint64) bool                           { return false }
+func (rc *raftNode) ReportUnreachable(id uint64)                          {}
+func (rc *raftNode) ReportSnapshot(id uint64, status raft.SnapshotStatus) {}
