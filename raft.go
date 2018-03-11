@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -167,6 +168,45 @@ func (rc *raftNode) startRaft() {
 	}
 
 	go rc.serveRaft()
+	go rc.serveChannels()
+}
+
+func (rc *raftNode) serveChannels() {
+	snap, err := rc.raftStorage.Snapshot()
+	if err != nil {
+		log.Fatalf("raftexample: take snapshot err (%v)", err)
+	}
+	rc.confState = snap.Metadata.ConfState
+	rc.snapshotIndex = snap.Metadata.Index
+	rc.appliedIndex = snap.Metadata.Index
+	defer rc.wal.Close()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	// handle request from kv store.
+	go func() {
+		var confChangeCount uint64
+		for rc.confChangeC != nil && rc.proposeC != nil {
+			select {
+			case prop, ok := <-rc.proposeC:
+				if !ok {
+					rc.proposeC = nil
+				} else {
+					rc.node.Propose(context.TODO(), []byte(prop))
+				}
+			case cc, ok := <-rc.confChangeC:
+				if !ok {
+					rc.confChangeC = nil
+				} else {
+					confChangeCount++
+					cc.ID = confChangeCount
+					rc.node.ProposeConfChange(context.TODO(), cc)
+				}
+			}
+		}
+		close(rc.stopc)
+	}()
 }
 
 func (rc *raftNode) serveRaft() {
@@ -175,10 +215,17 @@ func (rc *raftNode) serveRaft() {
 		log.Fatalf("raftexample: Failed parsing URL (%v)", err)
 	}
 
-	ln, err := newStoppableListener(host, rc.httpstopc)
+	ln, err := newStoppableListener(url.Host, rc.httpstopc)
 	if err != nil {
 		log.Fatalf("raftexample: Failed start raft httpserver: (%v)", err)
 	}
+
+	server := &http.Server{Handler: rc.transport.Handler()}
+	err = server.Serve(ln)
+	if err != nil {
+		log.Fatalf("raftexample: Server err (%v)", err)
+	}
+	close(rc.httpdonec)
 }
 
 // stoppableListener sets TCP keep-alive timeouts on accepted
