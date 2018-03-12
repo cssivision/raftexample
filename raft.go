@@ -243,9 +243,23 @@ func (rc *raftNode) serveChannels() {
 			}
 			rc.maybeTriggerSnapshot()
 			rc.node.Advance()
+		case err := <-rc.transport.ErrorC:
+			rc.writeError(err)
+			return
+		case <-rc.stopc:
+			rc.stop()
+			return
 		}
 	}
 
+}
+
+func (rc *raftNode) writeError(err error) {
+	rc.stopHTTP()
+	close(rc.commitC)
+	rc.errorC <- err
+	close(rc.errorC)
+	rc.node.Stop()
 }
 
 var snapshotCatchUpEntriesN uint64 = 10000
@@ -273,7 +287,7 @@ func (rc *raftNode) maybeTriggerSnapshot() {
 		compactIndex = rc.appliedIndex - snapshotCatchUpEntriesN
 	}
 	if err := rc.raftStorage.Compact(compactIndex); err != nil {
-		panic(err)
+		log.Fatalf("raftexample: compacted log at index err (%v)", err)
 	}
 
 	log.Printf("raftexample: compacted log at index %d", compactIndex)
