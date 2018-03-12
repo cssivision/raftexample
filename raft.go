@@ -241,9 +241,43 @@ func (rc *raftNode) serveChannels() {
 				rc.stop()
 				return
 			}
+			rc.maybeTriggerSnapshot()
+			rc.node.Advance()
 		}
 	}
 
+}
+
+var snapshotCatchUpEntriesN uint64 = 10000
+
+func (rc *raftNode) maybeTriggerSnapshot() {
+	if rc.appliedIndex-rc.snapshotIndex < rc.snapCount {
+		return
+	}
+
+	log.Printf("raftexample: start snapshot [applied index: %d | last snapshot index: %d]", rc.appliedIndex, rc.snapshotIndex)
+	data, err := rc.getSnapshot()
+	if err != nil {
+		log.Fatalf("raftexample: get snapshot err (%v)", err)
+	}
+	snap, err := rc.raftStorage.CreateSnapshot(rc.appliedIndex, &rc.confState, data)
+	if err != nil {
+		log.Fatalf("raftexample: create snapshot err (%v)", err)
+	}
+	if err := rc.saveSnap(snap); err != nil {
+		log.Fatalf("raftexample: save snapshot err (%v)", err)
+	}
+
+	compactIndex := uint64(1)
+	if rc.appliedIndex > snapshotCatchUpEntriesN {
+		compactIndex = rc.appliedIndex - snapshotCatchUpEntriesN
+	}
+	if err := rc.raftStorage.Compact(compactIndex); err != nil {
+		panic(err)
+	}
+
+	log.Printf("raftexample: compacted log at index %d", compactIndex)
+	rc.snapshotIndex = rc.appliedIndex
 }
 
 // stop closes http, closes all channels, and stops raft.
