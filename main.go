@@ -13,5 +13,7 @@ func main() {
 
 	var kvs *kvstore
 	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
-	newRaftNode(cfg, getSnapshot, proposeC, confChangeC)
+	commitC, errorC, snapshotterReady := newRaftNode(cfg, getSnapshot, proposeC, confChangeC)
+
+	newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
 }
