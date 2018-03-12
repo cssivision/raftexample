@@ -207,6 +207,145 @@ func (rc *raftNode) serveChannels() {
 		}
 		close(rc.stopc)
 	}()
+
+	// event loop on raft state machine updates
+	for {
+		select {
+		case <-ticker.C:
+			rc.node.Tick()
+		case rd := <-rc.node.Ready():
+			if err := rc.wal.Save(rd.HardState, rd.Entries); err != nil {
+				log.Fatalf("raftexample: save hardstate and entries err (%v)", err)
+			}
+			if !raft.IsEmptySnap(rd.Snapshot) {
+				if err := rc.saveSnap(rd.Snapshot); err != nil {
+					log.Fatalf("raftexample: save snapshot err (%v)", err)
+				}
+				if err := rc.raftStorage.ApplySnapshot(rd.Snapshot); err != nil {
+					log.Fatalf("raftexample: apply snapshot err (%v)", err)
+				}
+				if err := rc.publishSnapshot(rd.Snapshot); err != nil {
+					log.Fatalf("raftexample: publish snapshot err (%v)", err)
+				}
+			}
+
+			if err := rc.raftStorage.SetHardState(rd.HardState); err != nil {
+				log.Fatalf("raftexample: set hardstate err (%v)", err)
+			}
+			if err := rc.raftStorage.Append(rd.Entries); err != nil {
+				log.Fatalf("raftexample: append entries err (%v)", err)
+			}
+			rc.transport.Send(rd.Messages)
+
+			if ok := rc.publishEntries(rc.entriesToApply(rd.CommittedEntries)); !ok {
+				rc.stop()
+				return
+			}
+		}
+	}
+
+}
+
+// stop closes http, closes all channels, and stops raft.
+func (rc *raftNode) stop() {
+	rc.stopHTTP()
+	close(rc.commitC)
+	close(rc.errorC)
+	rc.node.Stop()
+}
+
+func (rc *raftNode) stopHTTP() {
+	rc.transport.Stop()
+	close(rc.httpstopc)
+	<-rc.httpdonec
+}
+
+func (rc *raftNode) publishEntries(ents []raftpb.Entry) bool {
+	for i := range ents {
+		switch ents[i].Type {
+		case raftpb.EntryNormal:
+			if len(ents[i].Data) == 0 {
+				// ignore empty entry
+				break
+			}
+			s := string(ents[i].Data)
+			select {
+			case rc.commitC <- &s:
+			case <-rc.stopc:
+				return false
+			}
+		case raftpb.EntryConfChange:
+			var cc raftpb.ConfChange
+			if err := cc.Unmarshal(ents[i].Data); err != nil {
+				log.Fatalf("unmarshal entryconf err (%v)", err)
+			}
+			rc.confState = *rc.node.ApplyConfChange(cc)
+			switch cc.Type {
+			case raftpb.ConfChangeAddNode:
+				if len(cc.Context) > 0 {
+					rc.transport.AddPeer(types.ID(cc.NodeID), []string{string(cc.Context)})
+				}
+			case raftpb.ConfChangeRemoveNode:
+				if cc.NodeID == uint64(rc.id) {
+					log.Println("I've been removed from the cluster! Shutting down.")
+					return false
+				}
+				rc.transport.RemovePeer(types.ID(cc.NodeID))
+			}
+		}
+
+		// after commit, update appliedIndex
+		rc.appliedIndex = ents[i].Index
+	}
+	return true
+}
+
+// discard entries that have been applied.
+func (rc *raftNode) entriesToApply(ents []raftpb.Entry) (nents []raftpb.Entry) {
+	if len(ents) == 0 {
+		return
+	}
+	firstIdx := ents[0].Index
+	if firstIdx > rc.appliedIndex+1 {
+		log.Fatalf("first index of committed entry[%d] should <= progress.appliedIndex[%d] 1", firstIdx, rc.appliedIndex)
+	}
+	if rc.appliedIndex-firstIdx+1 < uint64(len(ents)) {
+		nents = ents[rc.appliedIndex-firstIdx+1:]
+	}
+	return nents
+}
+
+func (rc *raftNode) publishSnapshot(snapshot raftpb.Snapshot) error {
+	if raft.IsEmptySnap(snapshot) {
+		return nil
+	}
+	log.Printf("publishing snapshot at index %d", rc.snapshotIndex)
+	defer log.Printf("finished publishing snapshot at index %d", rc.snapshotIndex)
+	if snapshot.Metadata.Index <= rc.appliedIndex {
+		return fmt.Errorf("snapshot index [%d] should > progress.appliedIndex [%d] + 1", snapshot.Metadata.Index, rc.appliedIndex)
+	}
+	rc.commitC <- nil
+	rc.confState = snapshot.Metadata.ConfState
+	rc.snapshotIndex = snapshot.Metadata.Index
+	rc.appliedIndex = snapshot.Metadata.Index
+	return nil
+}
+
+func (rc *raftNode) saveSnap(snap raftpb.Snapshot) error {
+	// must save the snapshot index to the WAL before saving the
+	// snapshot to maintain the invariant that we only Open the
+	// wal at previously-saved snapshot indexes.
+	walSnap := walpb.Snapshot{
+		Index: snap.Metadata.Index,
+		Term:  snap.Metadata.Term,
+	}
+	if err := rc.wal.SaveSnapshot(walSnap); err != nil {
+		return err
+	}
+	if err := rc.snapshotter.SaveSnap(snap); err != nil {
+		return err
+	}
+	return rc.wal.ReleaseLockTo(snap.Metadata.Index)
 }
 
 func (rc *raftNode) serveRaft() {
@@ -222,7 +361,9 @@ func (rc *raftNode) serveRaft() {
 
 	server := &http.Server{Handler: rc.transport.Handler()}
 	err = server.Serve(ln)
-	if err != nil {
+	select {
+	case <-rc.httpstopc:
+	default:
 		log.Fatalf("raftexample: Server err (%v)", err)
 	}
 	close(rc.httpdonec)
