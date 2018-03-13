@@ -131,6 +131,7 @@ func (rc *raftNode) replayWAL() *wal.WAL {
 
 func (rc *raftNode) startRaft() {
 	// replays WAL entries into the raft instance.
+	oldwal := fileutil.Exist(rc.waldir)
 	rc.wal = rc.replayWAL()
 
 	c := &raft.Config{
@@ -148,7 +149,7 @@ func (rc *raftNode) startRaft() {
 	}
 
 	// waldir store all the entry, so only determine waldir
-	if fileutil.Exist(rc.waldir) {
+	if oldwal {
 		rc.node = raft.RestartNode(c)
 	} else {
 		rc.node = raft.StartNode(c, rpeers)
