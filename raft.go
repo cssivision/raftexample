@@ -68,7 +68,7 @@ func (rc *raftNode) openSnapshot() *raftpb.Snapshot {
 	rc.snapshotter = raftsnap.New(rc.snapdir)
 	rc.snapshotterReady <- rc.snapshotter
 	snapshot, err := rc.snapshotter.Load()
-	if err != nil && err != raftsnap.ErrEmptySnapshot {
+	if err != nil && err != raftsnap.ErrNoSnapshot {
 		log.Fatalf("raftexample: error loading snapshot (%v)", err)
 	}
 

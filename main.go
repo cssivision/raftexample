@@ -6,6 +6,7 @@ import (
 
 func main() {
 	cfg := new(config)
+	parseFlag(cfg)
 	proposeC := make(chan string)
 	defer close(proposeC)
 	confChangeC := make(chan raftpb.ConfChange)
@@ -15,5 +16,7 @@ func main() {
 	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
 	commitC, errorC, snapshotterReady := newRaftNode(cfg, getSnapshot, proposeC, confChangeC)
 
-	newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
+	newKVStore(<-snapshotterReady, confChangeC, proposeC, commitC, errorC)
+
+	serveHTTP(kvs, cfg.port, errorC)
 }

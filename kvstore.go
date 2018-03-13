@@ -7,12 +7,14 @@ import (
 	"log"
 	"sync"
 
+	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/coreos/etcd/raftsnap"
 )
 
 // a key-value store backed by raft
 type kvstore struct {
 	proposeC    chan<- string // channel for proposing updates
+	confChangeC chan<- raftpb.ConfChange
 	mu          sync.RWMutex
 	kvStore     map[string]string // current committed key-value pairs
 	snapshotter *raftsnap.Snapshotter
@@ -23,8 +25,13 @@ type kv struct {
 	Val string
 }
 
-func newKVStore(snapshotter *raftsnap.Snapshotter, proposeC chan<- string, commitC <-chan *string, errorC <-chan error) *kvstore {
-	s := &kvstore{proposeC: proposeC, kvStore: make(map[string]string), snapshotter: snapshotter}
+func newKVStore(snapshotter *raftsnap.Snapshotter, confChangeC chan<- raftpb.ConfChange, proposeC chan<- string, commitC <-chan *string, errorC <-chan error) *kvstore {
+	s := &kvstore{
+		proposeC:    proposeC,
+		kvStore:     make(map[string]string),
+		snapshotter: snapshotter,
+		confChangeC: confChangeC,
+	}
 	go s.readCommits(commitC, errorC)
 	return s
 }
