@@ -71,6 +71,9 @@ func (rc *raftNode) openSnapshot() *raftpb.Snapshot {
 	if err != nil && err != raftsnap.ErrNoSnapshot {
 		log.Fatalf("raftexample: error loading snapshot (%v)", err)
 	}
+	if snapshot != nil {
+		rc.commitC <- nil
+	}
 
 	return snapshot
 }
@@ -132,8 +135,8 @@ func (rc *raftNode) startRaft() {
 
 	c := &raft.Config{
 		ID:              rc.id,
-		ElectionTick:    200,
-		HeartbeatTick:   20,
+		ElectionTick:    10,
+		HeartbeatTick:   1,
 		Storage:         rc.raftStorage,
 		MaxSizePerMsg:   1024 * 1024,
 		MaxInflightMsgs: 256,
@@ -407,6 +410,7 @@ func (rc *raftNode) serveRaft() {
 		log.Fatalf("raftexample: Failed start raft httpserver: (%v)", err)
 	}
 
+	log.Printf("raft server start at %v\n", url)
 	server := &http.Server{Handler: rc.transport.Handler()}
 	err = server.Serve(ln)
 	select {

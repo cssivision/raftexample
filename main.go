@@ -17,6 +17,5 @@ func main() {
 	commitC, errorC, snapshotterReady := newRaftNode(cfg, getSnapshot, proposeC, confChangeC)
 
 	newKVStore(<-snapshotterReady, confChangeC, proposeC, commitC, errorC)
-
 	serveHTTP(kvs, cfg.port, errorC)
 }
