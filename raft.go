@@ -411,7 +411,7 @@ func (rc *raftNode) serveRaft() {
 		log.Fatalf("raftexample: Failed start raft httpserver: (%v)", err)
 	}
 
-	log.Printf("raft server start at %v\n", url)
+	log.Printf("raftexample: raft server start at %v\n", url)
 	server := &http.Server{Handler: rc.transport.Handler()}
 	err = server.Serve(ln)
 	select {

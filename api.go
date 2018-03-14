@@ -25,7 +25,7 @@ func serveHTTP(kv *kvstore, port int, errorC <-chan error) {
 	}
 
 	go func() {
-		log.Printf("http api server start at %v\n", server.Addr)
+		log.Printf("raftexample: http api server start at %v\n", server.Addr)
 		log.Fatalln(server.ListenAndServe())
 	}()
 
