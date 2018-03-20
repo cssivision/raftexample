@@ -23,7 +23,7 @@ import (
 	"github.com/coreos/etcd/wal/walpb"
 )
 
-var defaultSnapCount uint64 = 10000
+var defaultSnapCount uint64 = 10
 
 // A key-value stream backed by raft
 type raftNode struct {
