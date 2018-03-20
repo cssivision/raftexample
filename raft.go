@@ -23,7 +23,7 @@ import (
 	"github.com/coreos/etcd/wal/walpb"
 )
 
-var defaultSnapCount uint64 = 10
+var defaultSnapCount uint64 = 5
 
 // A key-value stream backed by raft
 type raftNode struct {
@@ -270,7 +270,7 @@ func (rc *raftNode) writeError(err error) {
 	rc.node.Stop()
 }
 
-var snapshotCatchUpEntriesN uint64 = 10000
+var snapshotCatchUpEntriesN uint64 = 5
 
 func (rc *raftNode) maybeTriggerSnapshot() {
 	if rc.appliedIndex-rc.snapshotIndex < rc.snapCount {
@@ -292,7 +292,7 @@ func (rc *raftNode) maybeTriggerSnapshot() {
 
 	compactIndex := uint64(1)
 	if rc.appliedIndex > snapshotCatchUpEntriesN {
-		compactIndex = rc.appliedIndex - snapshotCatchUpEntriesN
+		compactIndex = rc.appliedIndex - snapshotCatchUpEntriesN + 1
 	}
 	if err := rc.raftStorage.Compact(compactIndex); err != nil {
 		log.Fatalf("raftexample: compacted log at index err (%v)", err)
